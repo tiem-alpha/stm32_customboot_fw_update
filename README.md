@@ -41,7 +41,7 @@ This project will perform firmware updates for the STM32 via UART1 using a custo
 Follow the below picture
 
 <p align="center" style="margin-left:0em;">
-<img src="./Img/HW_Setup.png" width="60%" height="60%" alt="HW_setup.png">
+<img src="./Images/HW_Setup.png" width="60%" height="60%" alt="HW_setup.png">
 </p>
 
 
@@ -69,7 +69,7 @@ https://www.youtube.com/watch?v=aLD9zggmop4
 Open MobaXterm and start a COM session corresponding to the USB-TTL port connected to UART2.
 
 <p align="center" style="margin-left:0em;">
-<img src="./Img/flash_bootloader.png" width="60%" height="60%" alt="HW_setup.png">
+<img src="./Images/open_log.png" width="60%" height="60%" alt="HW_setup.png">
 </p>
 
 - 1 Create new Session
@@ -83,7 +83,7 @@ Open MobaXterm and start a COM session corresponding to the USB-TTL port connect
 - Open STM32 Programmer
 
 <p align="center" style="margin-left:0em;">
-<img src="./Img/flash_bootloader.png" width="60%" height="60%" alt="HW_setup.png">
+<img src="./Images/flash_bootloader.png" width="60%" height="60%" alt="HW_setup.png">
 </p>
 
 - Click Download to flash bootloader
