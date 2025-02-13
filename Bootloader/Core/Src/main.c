@@ -30,12 +30,21 @@
 #define MAX_UART1_RX_BUFF 256
 
 /* Private variables ---------------------------------------------------------*/
+uint8_t BootLoaderVersion[3] = {MAJOR, MINOR, BUILD};
+static uint8_t state;
+static app_data appData;
+static uint16_t application_write_idx;
+static volatile uint8_t rxIdx = 0;
+static volatile uint8_t rxGetIdx = 0;
+static uint8_t fwTransferState = 0;
+uint8_t tx[MAX_UART1_TX_BUFF];
+uint8_t rx[MAX_UART1_RX_BUFF];
+static volatile uint8_t rxByte;
+
+
 UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
-/* USER CODE BEGIN PV */
-
-/* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
@@ -47,16 +56,7 @@ static HAL_StatusTypeDef write_data_to_flash_app(uint8_t *data,
                                                  uint16_t data_len, bool is_first_block);
 static void goto_application(void);
 
-uint8_t BootLoaderVersion[3] = {MAJOR, MINOR, BUILD};
-static uint8_t state;
-static app_data appData;
-static uint16_t application_write_idx;
-static volatile uint8_t rxIdx = 0;
-static volatile uint8_t rxGetIdx = 0;
-static uint8_t fwTransferState = 0;
-uint8_t tx[MAX_UART1_TX_BUFF];
-uint8_t rx[MAX_UART1_RX_BUFF];
-static volatile uint8_t rxByte;
+
 #if (LOG_ENABLE)
 #ifdef __GNUC__
 /* With GCC, small printf (option LD Linker->Libraries->Small printf
@@ -74,21 +74,66 @@ int fputc(int ch, FILE *f)
 }
 #endif
 
+/**
+  * @brief  Starts UART data reception in interrupt mode.
+  *         This function will receive data byte-by-byte through UART and store it in the rxByte variable.
+  *         Once a byte is received, the UART interrupt will be triggered for processing.
+  * 
+  * @param  None
+  * @retval None
+  * 
+  * @note   The huart1 variable must be configured and initialized before calling this function.
+  *         The rxByte variable must be declared to store the received data.
+  */
 void Start_UART_IT()
 {
   HAL_UART_Receive_IT(&huart1, (uint8_t *)&rxByte, 1); // Nhận từng byte một bằng ngắt
 }
 
+/**
+  * @brief  UART Receive Complete Callback.
+  *         This callback is called when a byte is received over UART.
+  *         The received byte is stored in the rx array, and the next byte is received using UART interrupt.
+  * 
+  * @param  huart: Pointer to the UART handle (UART_HandleTypeDef).
+  * @retval None
+  * 
+  * @note   This callback is triggered by the HAL_UART_Receive_IT function when a byte is received.
+  *         The rx array and rxIdx must be declared and properly initialized before using this callback.
+  */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 {
   if (huart == &huart1)
   {
-    // printf("%.2x", rxByte);
     rx[rxIdx++] = rxByte;
     HAL_UART_Receive_IT(&huart1, (uint8_t *)&rxByte, 1);
   }
 }
 
+/**
+  * @brief  Validates the response message received.
+  *         The function checks the response structure by validating the start byte, length byte,
+  *         command ID, and CRC. If the message is valid, it extracts application version and length
+  *         information from the response.
+  * 
+  * @param  buff: Pointer to the buffer containing the response message.
+  *               The buffer should include the following structure:
+  *               [0] - Start byte (0xAC)
+  *               [1] - Length byte (should be 6)
+  *               [2] - Command ID (NEW_FW)
+  *               [3-5] - Version information (Major, Minor, Build)
+  *               [6-7] - Application length (High byte and Low byte)
+  *               [8-9] - CRC (High byte and Low byte)
+  * 
+  * @retval true if the response is valid, false otherwise.
+  * 
+  * @note   This function assumes the following:
+  *         - The response starts with the byte 0xAC.
+  *         - The second byte should represent the length of the message.
+  *         - The third byte should be the command ID for the new firmware.
+  *         - CRC is calculated over bytes 1 to 7 and compared with bytes 8 and 9.
+  *         - The application version and length are stored in the global appData variable.
+  */
 bool CheckResponse(uint8_t *buff)
 {
   // AC - LENGTH - NEW_FW -  MAJOR - MINOR - BUILD - APP LEN H - APP LEN L - CRC H - CRC L
@@ -127,6 +172,26 @@ bool CheckResponse(uint8_t *buff)
   return true;
 }
 
+void Package_Parse(uint8_t byte){
+
+}
+
+/**
+  * @brief  Bootloader state machine that handles the bootloading process.
+  *         This function manages different states in the bootloader process including:
+  *         - Initializing the bootloader (POR).
+  *         - Sending and receiving bootloader signals (SEND_BL_SIGNAL, WAIT_SIGNAL_RESPONSE).
+  *         - Handling firmware package transfer (SEND_SIGNAL_ACK, WAIT_FW_PKG, SEND_FW_PCK_ACK).
+  *         - Writing received firmware data to flash memory (write_data_to_flash_app).
+  *         - Transitioning to the application after successful or unsuccessful firmware transfer (GOTO_APP).
+  * 
+  * @param  None
+  * @retval None
+  * 
+  * @note   The bootloader handles different states for communication, data validation, 
+  *         and firmware transfer. It uses UART for communication and handles firmware 
+  *         transfer in chunks, verifying the integrity using CRC checks.
+  */
 void BLStateMachine()
 {
   uint8_t errCnt = 0;
@@ -142,35 +207,23 @@ void BLStateMachine()
     switch (state)
     {
     case POR:
-      // SystemClock_Config();
-      // MX_GPIO_Init();
-      // MX_USART1_UART_Init();
       printf("Start boot loader %d.%d.%d \r\n", BootLoaderVersion[0], BootLoaderVersion[1], BootLoaderVersion[2]);
       state = SEND_BL_SIGNAL;
       break;
 
     case SEND_BL_SIGNAL:
       tx[0] = 0xAC;
-      // printf("SEND_BL_SIGNAL \r\n");
       rxIdx = 0;
       memset(rx, 0, sizeof(rx));
       Start_UART_IT();
       HAL_UART_Transmit(&huart1, (uint8_t *)tx, 1, HAL_MAX_DELAY);
       state = WAIT_SIGNAL_RESPONSE;
       previous_time = HAL_GetTick();
-      /* code */
       break;
 
     case WAIT_SIGNAL_RESPONSE: /// AC - len - NEW_FW - major - minor - build - app len high - app len low - crc high - crc low
-      // printf("WAIT_SIGNAL_RESPONSE \r\n");
       if ((rxIdx >= 10) && (rxIdx >= 10))
       {
-        // printf("Received 10 bytes\r\n");
-        // for (int i = 0; i < 10; i++)
-        // {
-        //   printf("0x%.2x ", rx[i]);
-        // }
-        // printf("\r\n");
         if (CheckResponse(rx))
         {
           state = SEND_SIGNAL_ACK;
@@ -216,14 +269,12 @@ void BLStateMachine()
       break;
 
     case WAIT_FW_PKG:
-      /* AC- length- fw transfer - data[] - crc h - crc l*/
-      // printf("data %d\r\n",rxIdx);
       if (rxIdx > 0 && rxGetIdx < rxIdx)
-      {
-        switch (fwTransferState)
+      { /* have coming data*/
+        /*Parsing data*/
+        switch (fwTransferState) 
         {
         case START_BYTE:
-          // printf("START_BYTE \r\n");
           if (rx[rxGetIdx] == 0xAC)
           {
             fwTransferState = LENGTH_BYTE;
@@ -234,13 +285,11 @@ void BLStateMachine()
           lengthPck = rx[rxGetIdx];
           fwTransferState = CMD_BYTE;
           remainDataByte = lengthPck;
-          // printf("LENGTH_BYTE %d\r\n", lengthPck);
           break;
 
         case CMD_BYTE:
           if (rx[rxGetIdx] == TRANSFER_FW)
           {
-            // printf("CMD_BYTE\r\n");
             fwTransferState = DATA_BYTE;
             remainDataByte--;
             dataIdx = rxGetIdx + 1;
@@ -249,7 +298,6 @@ void BLStateMachine()
 
         case DATA_BYTE:
           remainDataByte--;
-          // printf("DATA_BYTE %d\r\n", remainDataByte);
           if (remainDataByte <= 0)
           {
             fwTransferState = CRC1_BYTE;
@@ -257,21 +305,13 @@ void BLStateMachine()
           break;
 
         case CRC1_BYTE:
-          // printf("CRC1_BYTE\r\n");
           fwTransferState = CRC2_BYTE;
           break;
 
         case CRC2_BYTE:
-          // printf("CRC2_BYTE\r\n");
           crc = crc_16((const unsigned char *)&rx[dataIdx - 2], lengthPck + 1);
           if ((crc & 0xff) == rx[dataIdx + lengthPck] && ((crc >> 8) & 0xff) == rx[dataIdx - 1 + lengthPck])
           {
-            // printf("success crc\r\n");
-            // printf("write_data_to_flash_app \r\n");
-            // for(int i =0; i< lengthPck - 1;i++){
-            //   printf("%.2x",rx[dataIdx+i]);
-            // }
-            // printf("\r\n");
             ex = write_data_to_flash_app(&rx[dataIdx], lengthPck - 1, (curentAppOffet < lengthPck-1));
             if (ex != HAL_OK)
             {
@@ -301,8 +341,8 @@ void BLStateMachine()
       else
       {
         if (HAL_GetTick() - previous_time >= 1000)
-        {                                // Kiểm tra nếu đã trôi qua 1000ms
-          previous_time = HAL_GetTick(); // Cập nhật thời điểm hiện tại
+        {                               
+          previous_time = HAL_GetTick();
           printf("Time out\n");
           state = GOTO_APP;
         }
@@ -312,7 +352,6 @@ void BLStateMachine()
 
     case SEND_FW_PCK_ACK:
       tx[0] = 0x55;
-      // clear the memory
       lengthPck = 0;
       rxGetIdx = 0;
       fwTransferState = START_BYTE;
@@ -336,7 +375,6 @@ void BLStateMachine()
       break;
 
     case GOTO_APP:
-      
       return; 
       break;
 
@@ -347,6 +385,24 @@ void BLStateMachine()
   }
 }
 
+
+/**
+  * @brief  Writes data to the application flash memory. It unlocks the flash for writing, 
+  *         optionally erases the flash on the first block, writes the data in halfword 
+  *         chunks, and locks the flash memory after writing.
+  *
+  * @param  data          Pointer to the data buffer to be written to flash.
+  * @param  data_len      Length of the data to be written in bytes.
+  * @param  is_first_block A flag indicating if this is the first block of data. If true, 
+  *                        the flash memory is erased before writing the data.
+  * @retval HAL_StatusTypeDef The status of the flash writing operation:
+  *         - HAL_OK: If the operation was successful.
+  *         - Other status codes: If an error occurred during the process.
+  * 
+  * @note   This function uses a halfword (16-bit) write operation and handles the 
+  *         unlocking and locking of the flash memory. It also ensures that only the first 
+  *         block of data causes an erase operation on the flash.
+  */
 static HAL_StatusTypeDef write_data_to_flash_app(uint8_t *data,
                                                  uint16_t data_len, bool is_first_block)
 {
@@ -408,6 +464,15 @@ static HAL_StatusTypeDef write_data_to_flash_app(uint8_t *data,
   return ret;
 }
 
+/**
+  * @brief  Jumps to the application code from the bootloader. This function performs the necessary
+  *         steps to transition from the bootloader to the main application, including setting up 
+  *         the stack pointer, vector table, and calling the application's reset handler.
+  *
+  * @note   This function assumes that the application starts at a known memory location
+  *         defined by `APP_START_ADDRESS`. The application is expected to have a valid reset 
+  *         handler located at the second word in its vector table (address + 4).
+  */
 static void goto_application(void)
 {
   printf("Jump to Application...\r\n");
